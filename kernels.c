@@ -50,7 +50,7 @@ void kernel1(double* points,
              int n,
              int d,
              int k) {
-#pragma omp parallel for num_threads(8)
+#pragma omp parallel for num_threads(4)
     for (int c = 0; c < k; c++) {
         for (int kernelHead = 0; kernelHead < d; kernelHead += 4) {
             // [C[0][0], C[0][1], C[0][2], C[0][3]]    C[centroids][d]
@@ -83,13 +83,13 @@ void kernel1(double* points,
                 _mm256_store_pd(tmp2, curDist0);
                 _mm256_store_pd(tmp3, curDist0);
                 for (int j = 0; j < 4; j++) {
-                    #pragma omp atomic
+                    // #pragma omp atomic
                     dist[i * k + c] += tmp0[j];
-                    #pragma omp atomic
+                    // #pragma omp atomic
                     dist[(i + 1) * k + c] += tmp1[j];
-                    #pragma omp atomic
+                    // #pragma omp atomic
                     dist[(i + 2) * k + c] += tmp2[j];
-                    #pragma omp atomic
+                    // #pragma omp atomic
                     dist[(i + 3) * k + c] += tmp3[j];
                 }
             }
@@ -115,6 +115,7 @@ void kernel1(double* points,
  * @param mask n * k mask
  */
 void kernel2(int n, int k, double* dist, double* mask) {
+    #pragma omp parallel for num_threads(4)
     for (int i = 0; i < n; i += 8) {
         __m256d a = _mm256_set_pd(DBL_MAX, DBL_MAX, DBL_MAX, DBL_MAX);
         __m256d b = _mm256_set_pd(DBL_MAX, DBL_MAX, DBL_MAX, DBL_MAX);
@@ -212,10 +213,8 @@ void kernel3(int n,
     // Each maskx stores 4 same doubles.
     __m256d mask0, mask1, mask2, mask3;
 
-    // Transform -naf into 1.0
-    maskTransform(n, k, mask);
-
     // Calculate point number in each clusters
+    // #pragma omp parallel for num_threads(4)
     for (int c = 0; c < k; c += 4) {
         tmp = _mm256_setzero_pd();
         for (int i = 0; i < n; i++) {
@@ -224,7 +223,7 @@ void kernel3(int n,
         _mm256_store_pd(&countGroup[c], tmp);
     }
 
-#pragma omp parallel for num_threads(8)
+// #pragma omp parallel for num_threads(4)
     for (int c = 0; c < k; c += 4) {
         // Broadcast point number in 4 different clusters.
         __m256d count0 = _mm256_broadcast_sd(&countGroup[c]);
@@ -332,88 +331,85 @@ int main(int argc, char** argv) {
 
     double *dist, *mask, *points, *centroids;
     unsigned long long t0 = 0, t1 = 0;
+    int repeat = 100;
 
-    for (K = 4; K <= 128; K *= 2) {
-        posix_memalign((void**)&dist, 64, N * K * sizeof(double));
-        posix_memalign((void**)&mask, 64, N * K * sizeof(double));
-        posix_memalign((void**)&points, 64, N * dim * sizeof(double));
-        posix_memalign((void**)&centroids, 64, K * dim * sizeof(double));
+    for (K = 4; K <= 64; K *= 2) {
+        unsigned long long time11 = 0, time12 = 0, time2 = 0;
+        for (int r = 0; r < repeat; r++) {
+            posix_memalign((void**)&dist, 64, N * K * sizeof(double));
+            posix_memalign((void**)&mask, 64, N * K * sizeof(double));
+            posix_memalign((void**)&points, 64, N * dim * sizeof(double));
+            posix_memalign((void**)&centroids, 64, K * dim * sizeof(double));
 
-        for (int i = 0; i != N * K; ++i) {
-            dist[i] = 0;
+            for (int i = 0; i != N * K; ++i) {
+                dist[i] = 0;
+            }
+            srand((unsigned)time(NULL));
+            for (int i = 0; i < N * dim; i++) {
+                points[i] = ((double)rand()) / ((double)RAND_MAX);
+            }
+            for (int i = 0; i < K * dim; i++) {
+                centroids[i] = ((double)rand()) / ((double)RAND_MAX);
+            }
+
+            // printf("Points: \n");
+            // for (int i = 0; i < N; i++) {
+            //     for (int j = 0; j < dim; j++)
+            //         printf("%.2f ", points[i * dim + j]);
+            //     printf("\n");
+            // }
+            // printf("\n");
+
+            // printf("Old centroid: \n");
+            // for (int i = 0; i < K; i++) {
+            //     for (int j = 0; j < dim; j++)
+            //         printf("%.2lf ", centroids[i * dim + j]);
+            //     printf("\n");
+            // }
+            // printf("\n");
+
+
+            t0 = rdtsc();
+            kernel1(points, centroids, dist, N, dim, K);
+            t1 = rdtsc();
+            time11 += (t1 - t0);
+
+            // printf("Distance Matrix: \n");
+            // for (int i = 0; i < N; i++) {
+            //     for (int j = 0; j < K; j++)
+            //         printf("%.2f ", dist[i * K + j]);
+            //     printf("\n");
+            // }
+            // printf("\n");
+
+            t0 = rdtsc();
+            kernel2(N, K, dist, mask);
+            t1 = rdtsc();
+            time12 += (t1 - t0);
+
+            // printf("Generated Mask: \n");
+            // for (int i = 0; i < N; i++) {
+            //     for (int j = 0; j < K; j++) {
+            //         printf("%d ", mask[i * K + j] == 0.0 ? 0 : 1);
+            //     }
+            //     printf("\n");
+            // }
+            // printf("\n");
+            t0 = rdtsc();
+            kernel3(N, K, dim, mask, points, centroids);
+            t1 = rdtsc();
+            time2 += (t1 - t0);
+
+            free(dist);
+            free(mask);
+            free(points);
+            free(centroids);
         }
-        srand((unsigned)time(NULL));
-        for (int i = 0; i < N * dim; i++) {
-            points[i] = ((double)rand()) / ((double)RAND_MAX);
-        }
-        for (int i = 0; i < K * dim; i++) {
-            centroids[i] = ((double)rand()) / ((double)RAND_MAX);
-        }
 
-        // printf("Points: \n");
-        // for (int i = 0; i < N; i++) {
-        //     for (int j = 0; j < dim; j++)
-        //         printf("%.2f ", points[i * dim + j]);
-        //     printf("\n");
-        // }
-        // printf("\n");
-
-        // printf("Old centroid: \n");
-        // for (int i = 0; i < K; i++) {
-        //     for (int j = 0; j < dim; j++)
-        //         printf("%.2lf ", centroids[i * dim + j]);
-        //     printf("\n");
-        // }
-        // printf("\n");
-
-        unsigned long long time1 = 0, time2 = 0;
-
-        t0 = rdtsc();
-        kernel1(points, centroids, dist, N, dim, K);
-        t1 = rdtsc();
-        time1 += (t1 - t0);
-
-        // printf("Distance Matrix: \n");
-        // for (int i = 0; i < N; i++) {
-        //     for (int j = 0; j < K; j++)
-        //         printf("%.2f ", dist[i * K + j]);
-        //     printf("\n");
-        // }
-        // printf("\n");
-
-        t0 = rdtsc();
-        kernel2(N, K, dist, mask);
-        t1 = rdtsc();
-        time1 += (t1 - t0);
-
-        // printf("Generated Mask: \n");
-        // for (int i = 0; i < N; i++) {
-        //     for (int j = 0; j < K; j++) {
-        //         printf("%d ", mask[i * K + j] == 0.0 ? 0 : 1);
-        //     }
-        //     printf("\n");
-        // }
-        // printf("\n");
-        t0 = rdtsc();
-        kernel3(N, K, dim, mask, points, centroids);
-        t1 = rdtsc();
-        time2 += (t1 - t0);
-
-        // printf("New centroid values: \n");
-        // for (int i = 0; i < K; i++) {
-        //     for (int j = 0; j < dim; j++)
-        //         printf("%.2lf ", centroids[i * dim + j]);
-        //     printf("\n");
-        //
-
-        double perf1 = (double)(2 * N * dim + N * K) / time1;
-        double perf2 = (double)(N * dim) / time2;
-        printf("K = %d, perf1 = %lf, perf2 = %lf\n", K, perf1, perf2);
-
-        free(dist);
-        free(mask);
-        free(points);
-        free(centroids);
+        double perf11 = (double)((K*dim*N)*2) / (time11 / repeat);
+        double perf12 = (double)(N * K) / (time12 / repeat);
+        double perf2 = (double)(N * K / 4 + (N*K*dim*9)/16 + dim + K) / (time2 / repeat);
+        printf("K = %d, perf11 = %lf, perf12 = %lf, perf2 = %lf\n", K, perf11, perf12, perf2);
     }
 
     return 0;
